@@ -12,74 +12,54 @@ import glob
 import hashlib
 import magic
 import pefile
+import json
+import requests
 
-class basicSampleInfo(object):
+class SampleInfo(object):
 	''' A class to hold a few basic pieces of information of the
 	ransomware sample privided. '''
 
 	def __init__(self, file_name, family_name):
-		''' Initialize the contianer with a couple of information '''
-		self._ransomware_sample_file_name = file_name
-		self._ransomware_family_name = family_name
-		self._file_size = 0		# in bytes
-		self._file_type = ""
-		self._md5_hash = hashlib.md5()
-		self._sha1_hash = hashlib.sha1()
-		self._sha256_hash = hashlib.sha256()
+		''' Initialize the contianer with the required information holders '''
+		self._sample_info = {}
+		self._sample_info['sample_file_name'] = file_name
+		self._sample_info['family_name'] = family_name
 
-	def collect_information(self):
-		''' Extract important pieces of information about the PE file '''
+	def set_sample_info(self):
+		''' Extract important pieces of information about the sample '''
 
 		# Collect the hashes of the file
-		with open(self._ransomware_sample_file_name, 'rb') as f:
+		self._sample_info['md5'] = hashlib.md5()
+		self._sample_info['sha1'] = hashlib.sha1()
+		self._sample_info['sha256'] = hashlib.sha256()		
+
+		with open(self._sample_info['sample_file_name'], 'rb') as f:
 			buf = f.read()
-			self._md5_hash.update(buf)
-			self._sha1_hash.update(buf)
-			self._sha256_hash.update(buf)
-			
-		# Update the hashes to private members
-		self._md5_hash = self._md5_hash.hexdigest()
-		self._sha1_hash = self._sha1_hash.hexdigest()
-		self._sha256_hash = self._sha256_hash.hexdigest()
+			self._sample_info['md5'].update(buf)
+			self._sample_info['sha1'].update(buf)
+			self._sample_info['sha256'].update(buf)
+
+		# Update the hashes
+		self._sample_info['md5'] = self._sample_info['md5'].hexdigest()
+		self._sample_info['sha1'] = self._sample_info['sha1'].hexdigest()
+		self._sample_info['sha256'] = self._sample_info['sha256'].hexdigest()
 
 		# Collect the file size in bytes
-		self._file_size = os.stat(self._ransomware_sample_file_name).st_size
+		self._sample_info['file_size'] = os.stat(self._sample_info['sample_file_name']).st_size
 		# Collect the file type
-		self._file_type = magic.from_file(self._ransomware_sample_file_name, mime=True)
+		self._sample_info['file_type'] = magic.from_file(self._sample_info['sample_file_name'], mime=True)
 
-	def get_file_name(self):
-		''' Get the sample's file name '''
-		return self._ransomware_sample_file_name
-
-	def get_family_name(self) :
-		''' Get the sample's family name '''
-		return self._ransomware_family_name
-
-	def get_md5_hash(self):
-		''' Get the md5 hash of the sample '''
-		return self._md5_hash
-
-	def get_sha1_hash(self):
-		''' Get the sha1 hash of the sample '''
-		return self._sha1_hash
-
-	def get_sha256_hash(self):
-		''' Get the sha256 hash of the sample '''
-		return self._sha256_hash
-
-	def get_file_type(self):
-		''' Get the type of the sample file '''
-		return self._file_type
-
-	def get_file_size(self):
-		''' Get the size of the sample file '''
-		return self._file_size	
+	def get_sample_info(self):
+		''' Get all the extracted data of the sample in dictionary format '''
+		return self._sample_info
 
 
 class peFileExtractor(object):
 	''' This class is responsible to extract all the useful pieces
 	of information of the ransomware samples using different libraries. '''
+
 	def __init__(self, file_name):
+		''' Initialize the contianer with the required information holders '''
 		self._ransomware_sample_file_name = file_name
 		self._pe_file_extracted_data = {}	# Dictnionary to store all the data
 
@@ -140,6 +120,94 @@ class peFileExtractor(object):
 			self._pe_file_extracted_data['data_directory'].append(entry.name)
 			self._pe_file_extracted_data['number_of_data_directory'] += 1
 
+		'''Features for the sector headers '''
+		''' Sections include:
+		.text - code which should never be paged out of memory to disk
+		.data - read/write data (globals)
+		.rdata - read-only data (strings)
+		.bss - block started by symbol or block storage segments
+		.idata - import address table (it seems to merge with .text or .rdata)
+		.edata - export information '''
+		self._pe_file_extracted_data['number_of_pe_sections'] = 0
+		self._pe_file_extracted_data['sections_info'] = {}
+		for sections in pe.sections:
+			temp = {}
+			temp['section_name'] = str(sections.Name.decode().rstrip('\x00'))
+			# The total size of the section when loading into memory.
+			# Note: when it is more than SizeOfRawData, it indicates that the section is allocating
+			# more memory space than it has data written to disk.
+			temp['virtual_size'] = int(hex(sections.Misc_VirtualSize), 16)
+			# The size of the section or the initialized data on disk
+			temp['size_of_raw_data'] = int(hex(sections.SizeOfRawData), 16)
+			# RVA of the section relative to OptinalHeader.ImageBase
+			temp['virtual_address'] = hex(sections.VirtualAddress)
+			# Relative offset from the beginning of the file which says where the actual section
+			# data is stored
+			temp['point_to_raw_data'] = hex(sections.PointerToRawData)
+			temp['characteristics'] = hex(sections.Characteristics)
+
+			self._pe_file_extracted_data['sections_info'][self._pe_file_extracted_data['number_of_pe_sections']] = temp
+			self._pe_file_extracted_data['number_of_pe_sections'] += 1
+		del temp
+
+		''' Features of PE Version Info '''
+		for version_info in pe.VS_VERSIONINFO:
+			self._pe_file_extracted_data['version_info_length'] = hex(version_info.Length)
+			self._pe_file_extracted_data['version_info_value_length'] = hex(version_info.ValueLength)
+			self._pe_file_extracted_data['version_info_type'] = hex(version_info.Type)
+
+		''' Features of Imported Symbols '''
+		self._pe_file_extracted_data['imports_list'] = []
+		self._pe_file_extracted_data['libraries_list'] = []
+		self._pe_file_extracted_data['libraries_import_counts'] = {}
+		for entry in pe.DIRECTORY_ENTRY_IMPORT:
+			self._pe_file_extracted_data['libraries_list'].append(str(entry.dll.decode('utf-8')))
+			self._pe_file_extracted_data['libraries_import_counts'][str(entry.dll.decode('utf-8'))] = 0
+			for func in entry.imports:
+				self._pe_file_extracted_data['imports_list'].append(str(func.name.decode('utf-8')))
+				self._pe_file_extracted_data['libraries_import_counts'][str(entry.dll.decode('utf-8'))] += 1
+
+		''' Features of Exported Symbols '''
+		self._pe_file_extracted_data['exports_list'] = []
+		try:
+			for exp in pe.DIRECTORY_ENTRY_EXPORT.symbols:
+				self._pe_file_extracted_data['exports_list'].append(str(exp.name.decode('utf-8')))
+		except:	# Does not have any export table entries
+			pass
+
+
+class VirusTotalReport(object):
+	''' This class is reposible to scan the MD5 hash value of the sample
+	with the Virus Total engine and store the analytics report. '''
+
+	def __init__(self, api_key, resource):
+		''' Initialize the contianer with the required information holders '''
+		self._url = 'https://www.virustotal.com/vtapi/v2/file/report'
+		self._params = {'apikey' : api_key, 'resource' : resource}
+		self._vt_report = {}
+		self._vt_report['number_of_engines_detected_safe'] = 0
+		self._vt_report['number_of_engines_detected_malicious'] = 0
+		self._vt_report['total_number_of_engines'] = 0
+
+	def generate_report(self):
+		''' Retrieve the VT scanned report with the parameters and store the info to the dictionary '''
+		try:
+			response_json = requests.get(self._url, params=self._params)
+			response = response_json.json()
+			for av_engine in response['scans']:
+				if(response['scans'][av_engine]['detected'] == True):
+					self._vt_report['number_of_engines_detected_malicious'] += 1
+				if(response['scans'][av_engine]['detected'] == False):
+					self._vt_report['number_of_engines_detected_safe'] += 1
+				self._vt_report['total_number_of_engines'] += 1
+		except:		# Something went wrong
+			pass
+
+	def get_report(self):
+		''' Return the scanned results in dictionary format '''
+		return self._vt_report
+
+
 if __name__ == '__main__':
 	''' Driver program '''
 
@@ -154,23 +222,22 @@ if __name__ == '__main__':
 	all_ransomware_families = sorted(all_ransomware_families)
 
 	# Go to the family folder to scan each of its sample
-	os.chdir("./" + all_ransomware_families[0] + "/")
+	os.chdir("./" + all_ransomware_families[5] + "/")
 	sample_names = [i for i in glob.glob("*")]
 	sample_names = sorted(sample_names)
 
 	# Extract the basic pieces of information regarding the PE file
-	sample_info = basicSampleInfo(sample_names[0], all_ransomware_families[0])
-	sample_info.collect_information()
+	sample_info = SampleInfo(sample_names[0], all_ransomware_families[5])
+	sample_info.set_sample_info()
+	print(sample_info.get_sample_info())
 
 	# Extract the information based on the PE module
 	sample_pe_info = peFileExtractor(sample_names[0])
 	sample_pe_info.set_pe_file_extracted_data()
 	print(sample_pe_info.get_pe_file_extracted_data())
 
-	'''print(sample_info.get_file_name())
-	print(sample_info.get_family_name())
-	print(sample_info.get_file_size())
-	print(sample_info.get_file_type())
-	print(sample_info.get_md5_hash())
-	print(sample_info.get_sha1_hash())
-	print(sample_info.get_sha256_hash())'''
+	vt_api_key = "<api_key>"
+	vt_resource = sample_info.get_sample_info()['md5']
+	vt_report = VirusTotalReport(vt_api_key, vt_resource)
+	vt_report.generate_report()
+	print(vt_report.get_report())
