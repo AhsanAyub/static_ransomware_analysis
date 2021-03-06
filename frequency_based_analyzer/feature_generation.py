@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 __author__ = "Md. Ahsan Ayub"
 __license__ = "GPL"
 __credits__ = ["Ayub, Md. Ahsan", "Siraj, Ambareen"]
@@ -14,6 +16,7 @@ import magic
 import pefile
 import json
 import requests
+import yara
 
 class SampleInfo(object):
 	''' A class to hold a few basic pieces of information of the
@@ -53,6 +56,9 @@ class SampleInfo(object):
 		''' Get all the extracted data of the sample in dictionary format '''
 		return self._sample_info
 
+	def __str__(self):
+		''' This special method will be called when we print the object of the class '''
+		return str(self._sample_info)
 
 class peFileExtractor(object):
 	''' This class is responsible to extract all the useful pieces
@@ -63,22 +69,24 @@ class peFileExtractor(object):
 		self._ransomware_sample_file_name = file_name
 		self._pe_file_extracted_data = {}	# Dictnionary to store all the data
 
-	def get_pe_file_extracted_data(self):
-		''' Get all the extracted data in dictionary format '''
-		return self._pe_file_extracted_data
-
 	def set_pe_file_extracted_data(self):
 		''' Extract all the PE file meta-data '''
 		try:
 			pe = pefile.PE(self._ransomware_sample_file_name)
 		except OSError as e:
 			print(e)
+			return
 		except pefile.PEFormatError as e:
 			print(e.value)
+			return
+
+		# Once the PE is fully loaded, now we can fetch the warnings
+		pe.full_load()
+		self._pe_file_extracted_data['e_magic_value'] = pe.get_warnings()
 
 		''' Feature from the DOS Header '''
 		# Could be MZ, stands for Mark Zbikowski, or ZM on an (non-PE) EXE
-		self._pe_file_extracted_data['e_magic_value'] = hex(pe.DOS_HEADER.e_magic)[2:].decode("hex")
+		self._pe_file_extracted_data['e_magic_value'] = hex(pe.DOS_HEADER.e_magic)#[2:].decode("hex")
 		# This is a relative address to the NT header (can't be null)
 		self._pe_file_extracted_data['e_lfanew'] = hex(pe.DOS_HEADER.e_lfanew)
 
@@ -132,7 +140,10 @@ class peFileExtractor(object):
 		self._pe_file_extracted_data['sections_info'] = {}
 		for sections in pe.sections:
 			temp = {}
-			temp['section_name'] = str(sections.Name.decode().rstrip('\x00'))
+			try:
+				temp['section_name'] = str(sections.Name.decode().rstrip('\x00'))
+			except:
+				temp['section_name'] = sections.Name
 			# The total size of the section when loading into memory.
 			# Note: when it is more than SizeOfRawData, it indicates that the section is allocating
 			# more memory space than it has data written to disk.
@@ -151,21 +162,33 @@ class peFileExtractor(object):
 		del temp
 
 		''' Features of PE Version Info '''
-		for version_info in pe.VS_VERSIONINFO:
-			self._pe_file_extracted_data['version_info_length'] = hex(version_info.Length)
-			self._pe_file_extracted_data['version_info_value_length'] = hex(version_info.ValueLength)
-			self._pe_file_extracted_data['version_info_type'] = hex(version_info.Type)
+		self._pe_file_extracted_data['version_info_length'] = ''
+		self._pe_file_extracted_data['version_info_value_length'] = ''
+		self._pe_file_extracted_data['version_info_type'] = ''
+		try:
+			for version_info in pe.VS_VERSIONINFO:
+				self._pe_file_extracted_data['version_info_length'] = hex(version_info.Length)
+				self._pe_file_extracted_data['version_info_value_length'] = hex(version_info.ValueLength)
+				self._pe_file_extracted_data['version_info_type'] = hex(version_info.Type)
+		except:
+			pass
 
 		''' Features of Imported Symbols '''
 		self._pe_file_extracted_data['imports_list'] = []
 		self._pe_file_extracted_data['libraries_list'] = []
 		self._pe_file_extracted_data['libraries_import_counts'] = {}
-		for entry in pe.DIRECTORY_ENTRY_IMPORT:
-			self._pe_file_extracted_data['libraries_list'].append(str(entry.dll.decode('utf-8')))
-			self._pe_file_extracted_data['libraries_import_counts'][str(entry.dll.decode('utf-8'))] = 0
-			for func in entry.imports:
-				self._pe_file_extracted_data['imports_list'].append(str(func.name.decode('utf-8')))
-				self._pe_file_extracted_data['libraries_import_counts'][str(entry.dll.decode('utf-8'))] += 1
+		try:
+			for entry in pe.DIRECTORY_ENTRY_IMPORT:
+				self._pe_file_extracted_data['libraries_list'].append(str(entry.dll.decode('utf-8')))
+				self._pe_file_extracted_data['libraries_import_counts'][str(entry.dll.decode('utf-8'))] = 0
+				for func in entry.imports:
+					try:
+						self._pe_file_extracted_data['imports_list'].append(str(func.name.decode('utf-8')))
+						self._pe_file_extracted_data['libraries_import_counts'][str(entry.dll.decode('utf-8'))] += 1
+					except:
+						pass
+		except:
+			pass
 
 		''' Features of Exported Symbols '''
 		self._pe_file_extracted_data['exports_list'] = []
@@ -175,6 +198,13 @@ class peFileExtractor(object):
 		except:	# Does not have any export table entries
 			pass
 
+	def get_pe_file_extracted_data(self):
+		''' Get all the extracted data in dictionary format '''
+		return self._pe_file_extracted_data
+
+	def __str__(self):
+		''' This special method will be called when we print the object of the class '''
+		return str(self._pe_file_extracted_data)
 
 class VirusTotalReport(object):
 	''' This class is reposible to scan the MD5 hash value of the sample
@@ -207,37 +237,123 @@ class VirusTotalReport(object):
 		''' Return the scanned results in dictionary format '''
 		return self._vt_report
 
+	def __str__(self):
+		''' This special method will be called when we print the object of the class '''
+		return str(self._vt_report)
+
+
+class PackerAndCryptoCheck(object):
+	''' This class is designed to scan the PE file with the help of yara
+	module and then match them with the defined yara rules to check if the
+	sample is packed and uses crypto-based libraries.  '''
+
+	def __init__(self, file_name, packer_rules, crypto_rules):
+		''' Each object will be initialized with the defined variables to
+		store its unique pieces of information '''
+		self._packer_info = {}
+		self._crypto_info = {}
+		self._packer_info['is_packed'] = 0					# Default, we define no
+		self._packer_info['packer_list'] = []
+		self._crypto_info['uses_crypto_libraries'] = 0		# Default, we define no
+		self._crypto_info['crypto_list'] = []
+		self._file_name = file_name
+		self.packer_rules = packer_rules
+		self.crypto_rules = crypto_rules
+
+	def check_packer(self):
+		''' Check the packer information of the sample with the defined rules '''
+		try:
+			self._packer_info['packer_list'] = self.packer_rules.match(self._file_name)
+			if self._packer_info['packer_list']:
+				self._packer_info['is_packed'] = 1
+		except:
+			pass
+	
+	def check_crypto(self):
+		''' Check the crypto information of the sample with the defined rules '''
+		try:
+			self._crypto_info['crypto_list'] = self.crypto_rules.match(self._file_name)
+			if self._crypto_info['crypto_list']:
+				self._crypto_info['uses_crypto_libraries'] = 1
+		except:
+			pass
+
+	def get_packer_info(self):
+		''' Return the packer information of the sample in a dictionary format '''
+		return self._packer_info
+
+	def get_crypto_info(self):
+		''' Return the crypto information of the sample in a dictionary format '''
+		return self._crypto_info
+
+	def __str__(self):
+		''' This special method will be called when we print the object of the class '''
+		return str(self._packer_info) + str(self._crypto_info)
+
 
 if __name__ == '__main__':
 	''' Driver program '''
 
 	# Store the current directory to dump the samples later
 	current_directory = os.getcwd()
-	
+
+	# Retrieve all the defined rules
+	packer_rules = yara.compile(str(current_directory) + '\\knowledge_base\\packer.yar')
+	crypto_rules = yara.compile(str(current_directory) + '\\knowledge_base\\crypto.yar')
+
 	# Change the directory to go where the samples are
-	os.chdir("../samples/family_wise_samples/")
+	os.chdir(current_directory + '\\samples\\family_wise_samples/')
 
 	# get all the ransomware familiy names
 	all_ransomware_families = [i for i in glob.glob("*")]
 	all_ransomware_families = sorted(all_ransomware_families)
 
-	# Go to the family folder to scan each of its sample
-	os.chdir("./" + all_ransomware_families[5] + "/")
-	sample_names = [i for i in glob.glob("*")]
-	sample_names = sorted(sample_names)
+	# This dictionary will store the entire feature set
+	master_feature_data = {}
+	
+	# Iterate through each ransomware family folder to scan its each sample
+	for ransomware_family in all_ransomware_families:
 
-	# Extract the basic pieces of information regarding the PE file
-	sample_info = SampleInfo(sample_names[0], all_ransomware_families[5])
-	sample_info.set_sample_info()
-	print(sample_info.get_sample_info())
+		# Store all the samples of the family
+		os.chdir("./" + ransomware_family + "/")	# Change the directory
+		sample_names = [i for i in glob.glob("*")]
+		sample_names = sorted(sample_names)
 
-	# Extract the information based on the PE module
-	sample_pe_info = peFileExtractor(sample_names[0])
-	sample_pe_info.set_pe_file_extracted_data()
-	print(sample_pe_info.get_pe_file_extracted_data())
+		# Iterate through all the samples of the ransomware family
+		for sample_name in sample_names:
+			# Extract the basic pieces of information regarding the PE file
+			sample_info = SampleInfo(sample_name, all_ransomware_families[5])
+			sample_info.set_sample_info()
 
-	vt_api_key = "<api_key>"
-	vt_resource = sample_info.get_sample_info()['md5']
-	vt_report = VirusTotalReport(vt_api_key, vt_resource)
-	vt_report.generate_report()
-	print(vt_report.get_report())
+			# Extract the information based on the PE module
+			sample_pe_info = peFileExtractor(sample_name)
+			sample_pe_info.set_pe_file_extracted_data()
+
+			vt_api_key = "<api_key>"
+			vt_resource = sample_info.get_sample_info()['md5']
+			vt_report = VirusTotalReport(vt_api_key, vt_resource)
+			vt_report.generate_report()
+
+			packer_and_crypto = PackerAndCryptoCheck(sample_name, packer_rules, crypto_rules)
+			packer_and_crypto.check_packer()
+			packer_and_crypto.check_crypto()
+
+			master_feature_data[str(sample_info.get_sample_info()['md5'])] = {}
+			master_feature_data[str(sample_info.get_sample_info()['md5'])]['sample_info'] = sample_info.get_sample_info()
+			master_feature_data[str(sample_info.get_sample_info()['md5'])]['pe_static_analyzer'] = sample_pe_info.get_pe_file_extracted_data()
+			master_feature_data[str(sample_info.get_sample_info()['md5'])]['pe_static_analyzer']['packer_info'] = packer_and_crypto.get_packer_info()
+			master_feature_data[str(sample_info.get_sample_info()['md5'])]['pe_static_analyzer']['crypto_info'] = packer_and_crypto.get_crypto_info()
+			master_feature_data[str(sample_info.get_sample_info()['md5'])]['vt_analyzer_report'] = vt_report.get_report()
+
+		# Go back to the previous directory to point another ransomware family
+		os.chdir('../')		# Now, ready for the next iteration
+		print(ransomware_family + ' is done')
+
+	# Dumping the master feature dataset into a JSON file
+	#print(master_feature_data)
+	try:
+		with open(current_directory + '\\frequency_based_analyzer\\feature_dataset_dump.json', 'w') as fp:
+			json.dump(master_feature_data, fp)
+		print("All the operations have performed successfully.")
+	except:
+		print("The dataset could not be saved into a JSON file.")
