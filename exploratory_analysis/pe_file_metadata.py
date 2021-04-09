@@ -14,7 +14,7 @@ class DosHeader(object):
     1. Magic Value: value is going to be either MZ or MZ (an EXE file)
     '''
     
-    def __init__(self, magic_value: int):
+    def __init__(self, magic_value: str):
         ''' Store the required information during creation of the object '''
         self._magic_value = str(bytes.fromhex(magic_value[2:]).decode())
         
@@ -239,7 +239,7 @@ class CryptoInfo(object):
         
     # Return the list of packer librairs
     def get_crypto_libraries(self) -> list:
-        return self._crypto_librariesr
+        return self._crypto_libraries
     
     # Return the number of packer librareis used
     def get_crypto_libraries_length(self) -> int:
