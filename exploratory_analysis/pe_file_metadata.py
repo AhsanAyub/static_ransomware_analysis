@@ -167,11 +167,12 @@ class SectionHeader(object):
     
     def get_section_names(self) -> list:
         for item in self._section_info:
-            self._section_names.append(self._section_info[item]["section_name"])
+            if self._section_info[item]["section_name"] not in self._section_names:
+                self._section_names.append(self._section_info[item]["section_name"])
         return self._section_names
     
     def get_number_of_pe_section(self) -> int:
-        return len(self._section_names)
+        return len(self.get_section_names())
     
     
 class ImportTables(object):

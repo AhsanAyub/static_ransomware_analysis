@@ -195,7 +195,7 @@ def process_pe_crypto_info(dataset) -> CryptoInfo:
 if __name__ == '__main__':
     ''' Driver program '''
     
-    dataset = pd.read_pickle('data/pe_vt_info_dataset.pkl')
+    dataset = pd.read_pickle('data/feature_dataset_dump.pkl')
     
     sample_info_objects = []
     for sample_name in dataset:
@@ -220,6 +220,7 @@ if __name__ == '__main__':
         try:
             sample_info_object.section_header = SectionHeader(
                     dataset[sample_name]["pe_static_analyzer"]["sections_info"])
+            
         except:
             sample_info_object.section_header = SectionHeader({})
             print("section info field is not found")
@@ -248,7 +249,7 @@ if __name__ == '__main__':
             "size_of_initialized_data", "size_of_image", "subsystem",
             "dll_characteristics", "number_of_data_directory", "data_directory",
             "number_of_section_names", "section_names", "number_of_imports",
-            "number_of_libraries", "libraries", "libraries_import_counts",
+            "number_of_libraries", "libraries", "imports", "libraries_import_counts",
             "number_of_packer_libraries", "packer_libraries",
             "number_of_crypto_libraries", "crypto_libraries", "file_size",
             "file_type", "family_name"]
@@ -274,6 +275,7 @@ if __name__ == '__main__':
         temp.append(sample_info_object.import_tables.get_imports_length())
         temp.append(sample_info_object.import_tables.get_libraries_length())
         temp.append(sample_info_object.import_tables.get_libraries())
+        temp.append(sample_info_object.import_tables.get_imports())
         temp.append(sample_info_object.import_tables.get_libraries_import_counts())
         
         temp.append(sample_info_object.packer_info.get_packer_libraries_length())
@@ -289,3 +291,4 @@ if __name__ == '__main__':
         data.append(temp)
         
     dataset = pd.DataFrame(data, columns = cols)
+    dataset.to_pickle("./data/feature_dataset_dump.pkl")
