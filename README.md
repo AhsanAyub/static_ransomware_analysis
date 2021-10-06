@@ -6,7 +6,7 @@ The research project has been published at the 2021 IEEE Symposium Series on Com
 
 
 ### Citing this work
-If you use our implementation for academic research, you are highly encouraged to cite [our paper]().
+If you use our implementation for academic research, you are highly encouraged to cite [our paper](https://github.com/AhsanAyub/ahsanayub.github.io/blob/master/files/Authors_Copy_Static_Ransomware_Analysis.pdf).
 
 ```
 @inproceedings{ayub2021similarity,
